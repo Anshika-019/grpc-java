@@ -21,8 +21,11 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static io.grpc.xds.ClusterImplLoadBalancer.ATTR_SUBCHANNEL_ADDRESS_NAME;
 import static io.grpc.xds.XdsNameResolver.AUTO_HOST_REWRITE_KEY;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -188,7 +191,7 @@ public class ClusterImplLoadBalancerTest {
     assertThat(childBalancer.config).isSameInstanceAs(weightedTargetConfig);
     assertThat(childBalancer.attributes.get(io.grpc.xds.XdsAttributes.XDS_CLIENT))
         .isSameInstanceAs(xdsClient);
-    assertThat(childBalancer.attributes.get(NameResolver.ATTR_BACKEND_SERVICE)).isEqualTo(CLUSTER);
+    assertThat(childBalancer.attributes.get(NameResolver.ATTR_BACKEND_SERVICE)).isNull();
   }
 
   /**
@@ -289,11 +292,11 @@ public class ClusterImplLoadBalancerTest {
     // The value will be determined by the parent policy, so can be different than the value used in
     // makeAddress() for the test.
     verify(detailsConsumer).addOptionalLabel("grpc.lb.locality", locality.toString());
-    verify(detailsConsumer).addOptionalLabel("grpc.lb.backend_service", CLUSTER);
+    verify(detailsConsumer, never()).addOptionalLabel(eq("grpc.lb.backend_service"), any());
   }
 
   @Test
-  public void pick_noResult_addsClusterLabel() {
+  public void pick_noResult_doesNotAddClusterLabel() {
     LoadBalancerProvider weightedTargetProvider = new WeightedTargetLoadBalancerProvider();
     WeightedTargetConfig weightedTargetConfig =
         buildWeightedTargetConfig(ImmutableMap.of(locality, 10));
@@ -313,7 +316,7 @@ public class ClusterImplLoadBalancerTest {
       TestMethodDescriptors.voidMethod(), new Metadata(), CallOptions.DEFAULT, detailsConsumer);
     PickResult result = currentPicker.pickSubchannel(pickSubchannelArgs);
     assertThat(result.getStatus().isOk()).isTrue();
-    verify(detailsConsumer).addOptionalLabel("grpc.lb.backend_service", CLUSTER);
+    verify(detailsConsumer, never()).addOptionalLabel(eq("grpc.lb.backend_service"), any());
   }
 
   @Test
@@ -325,7 +328,8 @@ public class ClusterImplLoadBalancerTest {
         null, Collections.<DropOverload>emptyList(),
         GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
             weightedTargetProvider, weightedTargetConfig),
-        null, Collections.emptyMap(), null);
+        null, Collections.emptyMap(),
+        BackendMetricPropagation.fromMetricSpecs(Arrays.asList("named_metrics.*")));
     EquivalentAddressGroup endpoint = makeAddress("endpoint-addr", locality);
     deliverAddressesAndConfig(Collections.singletonList(endpoint), config);
     FakeLoadBalancer leafBalancer = Iterables.getOnlyElement(downstreamBalancers);
@@ -368,24 +372,24 @@ public class ClusterImplLoadBalancerTest {
     assertThat(localityStats.totalSuccessfulRequests()).isEqualTo(1L);
     assertThat(localityStats.totalErrorRequests()).isEqualTo(1L);
     assertThat(localityStats.totalRequestsInProgress()).isEqualTo(1L);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named1")).isTrue();
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named1")).isTrue();
     assertThat(
-        localityStats.loadMetricStatsMap().get("named1").numRequestsFinishedWithMetric()).isEqualTo(
-        2L);
-    assertThat(localityStats.loadMetricStatsMap().get("named1").totalMetricValue()).isWithin(
-        TOLERANCE).of(3.14159 + 2.718);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named2")).isTrue();
+        localityStats.loadMetricStatsMap().get("named_metrics.named1")
+            .numRequestsFinishedWithMetric()).isEqualTo(2L);
+    assertThat(localityStats.loadMetricStatsMap().get("named_metrics.named1")
+        .totalMetricValue()).isWithin(TOLERANCE).of(3.14159 + 2.718);
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named2")).isTrue();
     assertThat(
-        localityStats.loadMetricStatsMap().get("named2").numRequestsFinishedWithMetric()).isEqualTo(
-        2L);
-    assertThat(localityStats.loadMetricStatsMap().get("named2").totalMetricValue()).isWithin(
-        TOLERANCE).of(-1.618 + 1.414);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named3")).isTrue();
+        localityStats.loadMetricStatsMap().get("named_metrics.named2")
+            .numRequestsFinishedWithMetric()).isEqualTo(2L);
+    assertThat(localityStats.loadMetricStatsMap().get("named_metrics.named2")
+        .totalMetricValue()).isWithin(TOLERANCE).of(-1.618 + 1.414);
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named3")).isTrue();
     assertThat(
-        localityStats.loadMetricStatsMap().get("named3").numRequestsFinishedWithMetric()).isEqualTo(
-        1L);
-    assertThat(localityStats.loadMetricStatsMap().get("named3").totalMetricValue()).isWithin(
-        TOLERANCE).of(0.009);
+        localityStats.loadMetricStatsMap().get("named_metrics.named3")
+            .numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(localityStats.loadMetricStatsMap().get("named_metrics.named3")
+        .totalMetricValue()).isWithin(TOLERANCE).of(0.009);
 
     streamTracer3.streamClosed(Status.OK);
     subchannel.shutdown(); // stats recorder released

@@ -39,6 +39,7 @@ import com.google.common.net.InetAddresses;
 import com.google.common.util.concurrent.SettableFuture;
 import io.envoyproxy.envoy.config.core.v3.SocketAddress.Protocol;
 import io.grpc.Attributes;
+import io.grpc.ChannelConfigurator;
 import io.grpc.InsecureChannelCredentials;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
@@ -52,12 +53,14 @@ import io.grpc.StatusException;
 import io.grpc.StatusOr;
 import io.grpc.SynchronizationContext;
 import io.grpc.internal.FakeClock;
+import io.grpc.internal.ObjectPool;
 import io.grpc.testing.TestMethodDescriptors;
 import io.grpc.xds.EnvoyServerProtoData.CidrRange;
 import io.grpc.xds.EnvoyServerProtoData.FilterChain;
 import io.grpc.xds.EnvoyServerProtoData.FilterChainMatch;
 import io.grpc.xds.EnvoyServerProtoData.Listener;
 import io.grpc.xds.Filter.FilterConfig;
+import io.grpc.xds.Filter.FilterContext;
 import io.grpc.xds.Filter.NamedFilterConfig;
 import io.grpc.xds.FilterChainMatchingProtocolNegotiators.FilterChainMatchingHandler.FilterChainSelector;
 import io.grpc.xds.StatefulFilter.Config;
@@ -176,6 +179,50 @@ public class XdsServerWrapperTest {
         eq("grpc/server?udpa.resource.listening_address=[::FFFF:129.144.52.38]:80"),
         any(ResourceWatcher.class),
         any(SynchronizationContext.class));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBootstrap_ldsResourceNameResolver() throws Exception {
+    Bootstrapper.BootstrapInfo b =
+        Bootstrapper.BootstrapInfo.builder()
+            .servers(
+                Arrays.asList(
+                    Bootstrapper.ServerInfo.create("uri", InsecureChannelCredentials.create())))
+            .node(EnvoyProtoData.Node.newBuilder().setId("id").build())
+            .serverListenerResourceNameTemplate("grpc/server?udpa.resource.listening_address=%s")
+            .build();
+    XdsClient xdsClient = mock(XdsClient.class);
+    XdsListenerResource listenerResource = XdsListenerResource.getInstance();
+    when(xdsClient.getBootstrapInfo()).thenReturn(b);
+    xdsServerWrapper =
+        new XdsServerWrapper(
+            "[::FFFF:129.144.52.38]:80",
+            mockBuilder,
+            listener,
+            selectorManager,
+            new FakeXdsClientPoolFactory(xdsClient),
+            XdsServerTestHelper.RAW_BOOTSTRAP,
+            addr -> "xdstp://resolved_name/" + addr,
+            filterRegistry);
+    Executors.newSingleThreadExecutor()
+        .execute(
+            new Runnable() {
+              @Override
+              public void run() {
+                try {
+                  xdsServerWrapper.start();
+                } catch (IOException ex) {
+                  // ignore
+                }
+              }
+            });
+    verify(xdsClient, timeout(5000))
+        .watchXdsResource(
+            eq(listenerResource),
+            eq("xdstp://resolved_name/[::FFFF:129.144.52.38]:80"),
+            any(ResourceWatcher.class),
+            any(SynchronizationContext.class));
   }
 
   @Test
@@ -441,6 +488,62 @@ public class XdsServerWrapperTest {
   }
 
   @Test
+  public void shutdownNow_afterShutdown_stillUnblocksStartThread() throws Exception {
+    final SettableFuture<Server> start = SettableFuture.create();
+    Executors.newSingleThreadExecutor()
+        .execute(
+            new Runnable() {
+              @Override
+              public void run() {
+                try {
+                  start.set(xdsServerWrapper.start());
+                } catch (Exception ex) {
+                  start.setException(ex);
+                }
+              }
+            });
+    assertThat(xdsClient.ldsResource.get(5, TimeUnit.SECONDS))
+        .isEqualTo("grpc/server?udpa.resource.listening_address=0.0.0.0:1");
+    xdsServerWrapper.shutdown();
+    xdsServerWrapper.shutdownNow();
+    try {
+      start.get(5, TimeUnit.SECONDS);
+      fail("should have thrown but not");
+    } catch (ExecutionException ex) {
+      assertThat(ex).hasCauseThat().isInstanceOf(IOException.class);
+      assertThat(ex).hasCauseThat().hasMessageThat().isEqualTo("server is forcefully shut down");
+    }
+  }
+
+  @Test
+  public void shutdownNow_calledTwice_forcefullyShutsDownDelegateOnce() throws Exception {
+    final SettableFuture<Server> start = SettableFuture.create();
+    Executors.newSingleThreadExecutor()
+        .execute(
+            new Runnable() {
+              @Override
+              public void run() {
+                try {
+                  start.set(xdsServerWrapper.start());
+                } catch (Exception ex) {
+                  start.setException(ex);
+                }
+              }
+            });
+    assertThat(xdsClient.ldsResource.get(5, TimeUnit.SECONDS))
+        .isEqualTo("grpc/server?udpa.resource.listening_address=0.0.0.0:1");
+    xdsServerWrapper.shutdownNow();
+    xdsServerWrapper.shutdownNow();
+    try {
+      start.get(5, TimeUnit.SECONDS);
+      fail("should have thrown but not");
+    } catch (ExecutionException ex) {
+      assertThat(ex).hasCauseThat().isInstanceOf(IOException.class);
+    }
+    verify(mockServer, times(1)).shutdownNow();
+  }
+
+  @Test
   public void initialStartIoException() throws Exception {
     final SettableFuture<Server> start = SettableFuture.create();
     Executors.newSingleThreadExecutor().execute(new Runnable() {
@@ -645,8 +748,9 @@ public class XdsServerWrapperTest {
     EnvoyServerProtoData.FilterChain filterChain = EnvoyServerProtoData.FilterChain.create(
         "filter-chain-foo", createMatch(), httpConnectionManager, createTls(),
         mock(TlsContextManager.class));
+    // A wildcard port must not make a mismatched listener address valid.
     LdsUpdate listenerUpdate = LdsUpdate.forTcpListener(
-        Listener.create("listener", "20.3.4.5:1",
+        Listener.create("listener", "20.3.4.5:0",
             ImmutableList.copyOf(Collections.singletonList(filterChain)), null, Protocol.TCP));
 
     xdsClient.deliverLdsUpdate(listenerUpdate);
@@ -690,6 +794,44 @@ public class XdsServerWrapperTest {
     xdsClient.deliverLdsUpdate(listenerUpdate);
 
     verify(listener, timeout(10000)).onNotServing(any());
+  }
+
+  @Test
+  public void onChanged_listenerAddressWildcardPort()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    xdsServerWrapper = new XdsServerWrapper("10.1.2.3:1", mockBuilder, listener,
+        selectorManager, new FakeXdsClientPoolFactory(xdsClient),
+        XdsServerTestHelper.RAW_BOOTSTRAP,
+        filterRegistry, executor.getScheduledExecutorService());
+    final SettableFuture<Server> start = SettableFuture.create();
+    Executors.newSingleThreadExecutor().execute(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          start.set(xdsServerWrapper.start());
+        } catch (Exception ex) {
+          start.setException(ex);
+        }
+      }
+    });
+    String ldsResource = xdsClient.ldsResource.get(5, TimeUnit.SECONDS);
+    assertThat(ldsResource).isEqualTo("grpc/server?udpa.resource.listening_address=10.1.2.3:1");
+    VirtualHost virtualHost =
+        VirtualHost.create(
+            "virtual-host", Collections.singletonList("auth"), new ArrayList<Route>(),
+            ImmutableMap.<String, FilterConfig>of());
+    HttpConnectionManager httpConnectionManager = HttpConnectionManager.forVirtualHosts(
+        0L, Collections.singletonList(virtualHost), new ArrayList<NamedFilterConfig>());
+    EnvoyServerProtoData.FilterChain filterChain = EnvoyServerProtoData.FilterChain.create(
+        "filter-chain-foo", createMatch(), httpConnectionManager, createTls(),
+        mock(TlsContextManager.class));
+    LdsUpdate listenerUpdate = LdsUpdate.forTcpListener(
+        Listener.create("listener", "10.1.2.3:0",
+            ImmutableList.copyOf(Collections.singletonList(filterChain)), null, Protocol.TCP));
+
+    xdsClient.deliverLdsUpdate(listenerUpdate);
+
+    verify(listener, timeout(10000)).onServing();
   }
 
   @Test
@@ -1293,7 +1435,7 @@ public class XdsServerWrapperTest {
     Filter.Provider filterProvider = mock(Filter.Provider.class);
     when(filterProvider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
     when(filterProvider.isServerFilter()).thenReturn(true);
-    when(filterProvider.newInstance(any(String.class))).thenReturn(filter);
+    when(filterProvider.newInstance(any(FilterContext.class))).thenReturn(filter);
     filterRegistry.register(filterProvider);
 
     FilterConfig f0 = mock(FilterConfig.class);
@@ -1366,7 +1508,7 @@ public class XdsServerWrapperTest {
     Filter.Provider filterProvider = mock(Filter.Provider.class);
     when(filterProvider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
     when(filterProvider.isServerFilter()).thenReturn(true);
-    when(filterProvider.newInstance(any(String.class))).thenReturn(filter);
+    when(filterProvider.newInstance(any(FilterContext.class))).thenReturn(filter);
     filterRegistry.register(filterProvider);
 
     FilterConfig f0 = mock(FilterConfig.class);
@@ -2029,5 +2171,32 @@ public class XdsServerWrapperTest {
 
   static EnvoyServerProtoData.DownstreamTlsContext createTls() {
     return CommonTlsContextTestsUtil.buildTestInternalDownstreamTlsContext("CERT1", "VA1");
+  }
+
+  @Test
+  public void childChannelConfigurator_passedToXdsClientPool() {
+    ChannelConfigurator configurator = builder -> { };
+    XdsClientPoolFactory mockPoolFactory = mock(XdsClientPoolFactory.class);
+    @SuppressWarnings("unchecked")
+    ObjectPool<XdsClient> mockPool = mock(ObjectPool.class);
+    when(mockPool.getObject()).thenReturn(xdsClient);
+    when(mockPoolFactory.getOrCreate(any(), any(), any(), any())).thenReturn(mockPool);
+
+    XdsServerWrapper serverWrapper = new XdsServerWrapper(
+        "0.0.0.0:1", mockBuilder, listener, selectorManager, mockPoolFactory,
+        XdsServerTestHelper.RAW_BOOTSTRAP, filterRegistry,
+        executor.getScheduledExecutorService(), configurator);
+
+    Executors.newSingleThreadExecutor().execute(() -> {
+      try {
+        serverWrapper.start();
+      } catch (IOException ex) {
+        // ignore
+      }
+    });
+
+    verify(mockPoolFactory, timeout(5000)).getOrCreate(
+        any(), any(), any(), eq(configurator));
+    serverWrapper.shutdownNow();
   }
 }

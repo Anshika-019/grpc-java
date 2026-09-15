@@ -90,7 +90,6 @@ import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultEventLoop;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
@@ -112,6 +111,7 @@ import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.proxy.ProxyConnectException;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import java.io.File;
@@ -919,7 +919,8 @@ public class ProtocolNegotiatorsTest {
         return "h2";
       }
     };
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
 
     ClientTlsHandler handler = new ClientTlsHandler(grpcHandler, sslContext,
         "authority", elg, noopLogger, Optional.absent(),
@@ -937,6 +938,47 @@ public class ProtocolNegotiatorsTest {
   }
 
   @Test
+  public void grpcSslContextsConfigure_enablesEndpointIdentification() throws Exception {
+    SslContext clientSslContext = GrpcSslContexts.configure(
+        SslContextBuilder.forClient().endpointIdentificationAlgorithm(null)).build();
+
+    SSLEngine sslEngine = clientSslContext.newEngine(channel.alloc(), "localhost", 443);
+
+    assertThat(sslEngine.getSSLParameters().getEndpointIdentificationAlgorithm())
+        .isEqualTo("HTTPS");
+  }
+
+  @Test
+  public void clientTlsHandler_nullEndpointIdentificationUsesHttps() throws Exception {
+    SslContext clientSslContext = GrpcSslContexts.forClient()
+        .endpointIdentificationAlgorithm(null)
+        .build();
+    ClientTlsHandler handler = new ClientTlsHandler(grpcHandler, clientSslContext,
+        "authority", null, noopLogger, Optional.absent(),
+        getClientTlsProtocolNegotiator(), null);
+
+    pipeline.addLast(handler);
+
+    assertThat(pipeline.get(SslHandler.class).engine().getSSLParameters()
+        .getEndpointIdentificationAlgorithm()).isEqualTo("HTTPS");
+  }
+
+  @Test
+  public void clientTlsHandler_emptyEndpointIdentificationRemainsDisabled() throws Exception {
+    SslContext clientSslContext = GrpcSslContexts.forClient()
+        .endpointIdentificationAlgorithm("")
+        .build();
+    ClientTlsHandler handler = new ClientTlsHandler(grpcHandler, clientSslContext,
+        "authority", null, noopLogger, Optional.absent(),
+        getClientTlsProtocolNegotiator(), null);
+
+    pipeline.addLast(handler);
+
+    assertThat(pipeline.get(SslHandler.class).engine().getSSLParameters()
+        .getEndpointIdentificationAlgorithm()).isEmpty();
+  }
+
+  @Test
   public void clientTlsHandler_userEventTriggeredSslEvent_supportedProtocolCustom()
       throws Exception {
     SslHandler goodSslHandler = new SslHandler(engine, false) {
@@ -945,7 +987,8 @@ public class ProtocolNegotiatorsTest {
         return "managed_mtls";
       }
     };
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
 
     InputStream clientCert = TlsTesting.loadCert("client.pem");
     InputStream key = TlsTesting.loadCert("client.key");
@@ -983,7 +1026,8 @@ public class ProtocolNegotiatorsTest {
         return "badproto";
       }
     };
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
 
     ClientTlsHandler handler = new ClientTlsHandler(grpcHandler, sslContext,
         "authority", elg, noopLogger, Optional.absent(),
@@ -1113,7 +1157,8 @@ public class ProtocolNegotiatorsTest {
 
   @Test
   public void httpProxy_completes() throws Exception {
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
     // ProxyHandler is incompatible with EmbeddedChannel because when channelRegistered() is called
     // the channel is already active.
     LocalAddress proxy = new LocalAddress("httpProxy_completes");
@@ -1176,7 +1221,8 @@ public class ProtocolNegotiatorsTest {
 
   @Test
   public void httpProxy_500() throws Exception {
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
     // ProxyHandler is incompatible with EmbeddedChannel because when channelRegistered() is called
     // the channel is already active.
     LocalAddress proxy = new LocalAddress("httpProxy_500");
@@ -1228,7 +1274,8 @@ public class ProtocolNegotiatorsTest {
 
   @Test
   public void httpProxy_customHeaders() throws Exception {
-    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
     // ProxyHandler is incompatible with EmbeddedChannel because when channelRegistered() is called
     // the channel is already active.
     LocalAddress proxy = new LocalAddress("httpProxy_customHeaders");
@@ -1299,7 +1346,8 @@ public class ProtocolNegotiatorsTest {
 
   @Test
   public void waitUntilActiveHandler_firesNegotiation() throws Exception {
-    EventLoopGroup elg = new DefaultEventLoopGroup(1);
+    @SuppressWarnings("deprecation") // Wait a bit before migrating to the Netty 4.2 API
+    EventLoopGroup elg = new io.netty.channel.DefaultEventLoopGroup(1);
     SocketAddress addr = new LocalAddress("addr");
     final AtomicReference<Object> event = new AtomicReference<>();
     ChannelHandler next = new ChannelInboundHandlerAdapter() {

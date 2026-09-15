@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.CharStreams;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.grpc.ChannelConfigurator;
 import io.grpc.MetricRecorder;
 import io.grpc.NameResolver;
 import io.grpc.NameResolverRegistry;
@@ -108,6 +109,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
   private final Resource<Executor> executorResource;
   private final String target;
   private final MetricRecorder metricRecorder;
+  private final ChannelConfigurator channelConfigurator;
   private final NameResolver delegate;
   private final boolean usingExecutorResource;
   private final boolean forceXds;
@@ -135,8 +137,6 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     QueryParams queryParams = QueryParams.fromRawQuery(grpcUri.getRawQuery());
     this.forceXds = checkForceXds(queryParams);
     this.schemeOverride = (forceXds || isOnGcp) ? "xds" : "dns";
-    stripForceXds(queryParams);
-    String newQuery = queryParams.toRawQuery();
 
     Preconditions.checkArgument(
         targetPath.startsWith("/"),
@@ -147,7 +147,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     syncContext = checkNotNull(args, "args").getSynchronizationContext();
 
     Uri.Builder modifiedTargetBuilder = grpcUri.toBuilder().setScheme(schemeOverride);
-    modifiedTargetBuilder.setRawQuery(newQuery);
+    modifiedTargetBuilder.setRawQuery(null);
     if (schemeOverride.equals("xds")) {
       modifiedTargetBuilder.setRawAuthority(C2P_AUTHORITY);
     }
@@ -160,6 +160,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     }
     target = targetUri.toString();
     metricRecorder = args.getMetricRecorder();
+    channelConfigurator = args.getChildChannelConfigurator();
     delegate = checkNotNull(nameResolverFactory, "nameResolverFactory").newNameResolver(
         targetUri, args);
     executor = args.getOffloadExecutor();
@@ -180,8 +181,6 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     QueryParams queryParams = QueryParams.fromRawQuery(targetUri.getRawQuery());
     this.forceXds = checkForceXds(queryParams);
     this.schemeOverride = (forceXds || isOnGcp) ? "xds" : "dns";
-    stripForceXds(queryParams);
-    String newQuery = queryParams.toRawQuery();
 
     Preconditions.checkArgument(
         targetUri.isPathAbsolute(),
@@ -195,11 +194,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     authority = GrpcUtil.checkAuthority(pathSegments.get(0));
     syncContext = checkNotNull(args, "args").getSynchronizationContext();
     Uri.Builder modifiedTargetBuilder = targetUri.toBuilder().setScheme(schemeOverride);
-    if (newQuery != null) {
-      modifiedTargetBuilder.setRawQuery(newQuery);
-    } else {
-      modifiedTargetBuilder.setRawQuery(null);
-    }
+    modifiedTargetBuilder.setRawQuery(null);
 
     if (schemeOverride.equals("xds")) {
       modifiedTargetBuilder.setRawAuthority(C2P_AUTHORITY);
@@ -211,6 +206,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     targetUri = modifiedTargetBuilder.build();
     target = targetUri.toString();
     metricRecorder = args.getMetricRecorder();
+    channelConfigurator = args.getChildChannelConfigurator();
     delegate =
         checkNotNull(nameResolverFactory, "nameResolverFactory").newNameResolver(targetUri, args);
     executor = args.getOffloadExecutor();
@@ -278,7 +274,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
             public void run() {
               if (!shutdown && finalBootstrapInfo != null) {
                 xdsClientPool = InternalSharedXdsClientPoolProvider.getOrCreate(
-                    target, finalBootstrapInfo, metricRecorder, null);
+                    target, finalBootstrapInfo, metricRecorder, null, channelConfigurator);
                 xdsClient = xdsClientPool.getObject();
                 delegate.start(listener);
                 succeeded = true;
@@ -411,9 +407,7 @@ final class GoogleCloudToProdNameResolver extends NameResolver {
     return false;
   }
 
-  private static void stripForceXds(QueryParams params) {
-    params.asList().removeIf(entry -> "force-xds".equals(entry.getKey()));
-  }
+
 
   private enum HttpConnectionFactory implements HttpConnectionProvider {
     INSTANCE;

@@ -107,7 +107,8 @@ final class WeightedRoundRobinLoadBalancer extends MultiChildLoadBalancer {
   private final Ticker ticker;
   private String locality = "";
   private String backendService = "";
-  private SubchannelPicker currentPicker = new FixedResultPicker(PickResult.withNoResult());
+  private SubchannelPicker currentPicker = new FixedResultPicker(
+      PickResult.withNoResult("connecting", "weighted_round_robin: initializing"));
 
   // The metric instruments are only registered once and shared by all instances of this LB.
   static {
@@ -227,7 +228,9 @@ final class WeightedRoundRobinLoadBalancer extends MultiChildLoadBalancer {
 
       if (isConnecting) {
         updateBalancingState(
-            ConnectivityState.CONNECTING, new FixedResultPicker(PickResult.withNoResult()));
+            ConnectivityState.CONNECTING,
+            new FixedResultPicker(
+                PickResult.withNoResult("connecting", "weighted_round_robin: connecting")));
       } else {
         updateBalancingState(
             ConnectivityState.TRANSIENT_FAILURE, createReadyPicker(getChildLbStates()));
@@ -826,6 +829,19 @@ final class WeightedRoundRobinLoadBalancer extends MultiChildLoadBalancer {
       return Objects.hash(blackoutPeriodNanos, weightExpirationPeriodNanos, enableOobLoadReport,
           oobReportingPeriodNanos, weightUpdatePeriodNanos, errorUtilizationPenalty,
           parsedMetricNamesForComputingUtilization);
+    }
+
+    @Override
+    public String toString() {
+      return MoreObjects.toStringHelper(this)
+          .add("blackoutPeriodNanos", blackoutPeriodNanos)
+          .add("weightExpirationPeriodNanos", weightExpirationPeriodNanos)
+          .add("enableOobLoadReport", enableOobLoadReport)
+          .add("oobReportingPeriodNanos", oobReportingPeriodNanos)
+          .add("weightUpdatePeriodNanos", weightUpdatePeriodNanos)
+          .add("errorUtilizationPenalty", errorUtilizationPenalty)
+          .add("parsedMetricNamesForComputingUtilization", parsedMetricNamesForComputingUtilization)
+          .toString();
     }
 
     static final class Builder {

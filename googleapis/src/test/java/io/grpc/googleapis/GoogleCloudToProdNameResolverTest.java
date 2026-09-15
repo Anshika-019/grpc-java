@@ -22,6 +22,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.Iterables;
+import io.grpc.ChannelConfigurator;
 import io.grpc.ChannelLogger;
 import io.grpc.MetricRecorder;
 import io.grpc.NameResolver;
@@ -102,6 +103,7 @@ public class GoogleCloudToProdNameResolverTest {
   private final Map<String, NameResolver> delegatedResolver = new HashMap<>();
   private final Map<String, URI> delegatedUri = new HashMap<>();
   private final Map<String, Uri> delegatedRfcUri = new HashMap<>();
+  private final Map<String, Args> delegatedArgs = new HashMap<>();
 
   @Mock
   private NameResolver.Listener2 mockListener;
@@ -212,9 +214,9 @@ public class GoogleCloudToProdNameResolverTest {
   }
 
   @Test
-  public void notOnGcpButForceXds_KeyValueTrue_DelegateToXds() {
+  public void notOnGcpButForceXds_WithValue_DelegateToXds() {
     GoogleCloudToProdNameResolver.isOnGcp = false;
-    String target = TARGET_URI + "?force-xds=true";
+    String target = TARGET_URI + "?force-xds=foo";
     resolver = enableRfc3986UrisParam
         ? new GoogleCloudToProdNameResolver(
             Uri.create(target), args, fakeExecutorResource, nsRegistry.asFactory())
@@ -235,6 +237,69 @@ public class GoogleCloudToProdNameResolverTest {
     }
   }
 
+  @Test
+  public void notOnGcpButForceXds_PercentEncoded_DelegateToXds() {
+    GoogleCloudToProdNameResolver.isOnGcp = false;
+    String target = TARGET_URI + "?force%2Dxds";
+    resolver = enableRfc3986UrisParam
+        ? new GoogleCloudToProdNameResolver(
+            Uri.create(target), args, fakeExecutorResource, nsRegistry.asFactory())
+        : new GoogleCloudToProdNameResolver(
+            URI.create(target), args, fakeExecutorResource, nsRegistry.asFactory());
+    resolver.start(mockListener);
+    fakeExecutor.runDueTasks();
+    assertThat(delegatedResolver.keySet()).containsExactly("xds");
+
+    if (enableRfc3986UrisParam) {
+      Uri delegatedRfcUriValue = delegatedRfcUri.get("xds");
+      assertThat(delegatedRfcUriValue).isNotNull();
+      assertThat(delegatedRfcUriValue.getRawQuery()).isNull();
+    } else {
+      URI delegatedUriValue = delegatedUri.get("xds");
+      assertThat(delegatedUriValue).isNotNull();
+      assertThat(delegatedUriValue.getQuery()).isNull();
+    }
+  }
+
+  @Test
+  public void notOnGcpButForceXds_DuplicateKeys_DelegateToXds() {
+    GoogleCloudToProdNameResolver.isOnGcp = false;
+    String target = TARGET_URI + "?force-xds=&force-xds=true";
+    resolver = enableRfc3986UrisParam
+        ? new GoogleCloudToProdNameResolver(
+            Uri.create(target), args, fakeExecutorResource, nsRegistry.asFactory())
+        : new GoogleCloudToProdNameResolver(
+            URI.create(target), args, fakeExecutorResource, nsRegistry.asFactory());
+    resolver.start(mockListener);
+    fakeExecutor.runDueTasks();
+    assertThat(delegatedResolver.keySet()).containsExactly("xds");
+
+    if (enableRfc3986UrisParam) {
+      Uri delegatedRfcUriValue = delegatedRfcUri.get("xds");
+      assertThat(delegatedRfcUriValue).isNotNull();
+      assertThat(delegatedRfcUriValue.getRawQuery()).isNull();
+    } else {
+      URI delegatedUriValue = delegatedUri.get("xds");
+      assertThat(delegatedUriValue).isNotNull();
+      assertThat(delegatedUriValue.getQuery()).isNull();
+    }
+  }
+
+  @Test
+  public void childChannelConfigurator_passedToDelegatedResolver() {
+    GoogleCloudToProdNameResolver.isOnGcp = false;
+    ChannelConfigurator configurator = builder -> { };
+    Args customArgs = args.toBuilder().setChildChannelConfigurator(configurator).build();
+    resolver = enableRfc3986UrisParam
+        ? new GoogleCloudToProdNameResolver(
+            Uri.create(TARGET_URI), customArgs, fakeExecutorResource, nsRegistry.asFactory())
+        : new GoogleCloudToProdNameResolver(
+            URI.create(TARGET_URI), customArgs, fakeExecutorResource, nsRegistry.asFactory());
+    resolver.start(mockListener);
+    assertThat(delegatedArgs.keySet()).containsExactly("dns");
+    assertThat(delegatedArgs.get("dns").getChildChannelConfigurator())
+        .isSameInstanceAs(configurator);
+  }
 
   @Test
   public void notOnGcpButForceXds_WithMultipleParams_DelegateToXds() {
@@ -252,11 +317,11 @@ public class GoogleCloudToProdNameResolverTest {
     if (enableRfc3986UrisParam) {
       Uri delegatedRfcUriValue = delegatedRfcUri.get("xds");
       assertThat(delegatedRfcUriValue).isNotNull();
-      assertThat(delegatedRfcUriValue.getRawQuery()).isEqualTo("foo=bar&baz=qux");
+      assertThat(delegatedRfcUriValue.getRawQuery()).isNull();
     } else {
       URI delegatedUriValue = delegatedUri.get("xds");
       assertThat(delegatedUriValue).isNotNull();
-      assertThat(delegatedUriValue.getQuery()).isEqualTo("foo=bar&baz=qux");
+      assertThat(delegatedUriValue.getQuery()).isNull();
     }
   }
 
@@ -276,11 +341,11 @@ public class GoogleCloudToProdNameResolverTest {
     if (enableRfc3986UrisParam) {
       Uri delegatedRfcUriValue = delegatedRfcUri.get("xds");
       assertThat(delegatedRfcUriValue).isNotNull();
-      assertThat(delegatedRfcUriValue.getRawQuery()).isEqualTo("foo=bar%26baz");
+      assertThat(delegatedRfcUriValue.getRawQuery()).isNull();
     } else {
       URI delegatedUriValue = delegatedUri.get("xds");
       assertThat(delegatedUriValue).isNotNull();
-      assertThat(delegatedUriValue.getRawQuery()).isEqualTo("foo=bar%26baz");
+      assertThat(delegatedUriValue.getRawQuery()).isNull();
     }
   }
 
@@ -299,11 +364,11 @@ public class GoogleCloudToProdNameResolverTest {
     if (enableRfc3986UrisParam) {
       Uri delegatedRfcUriValue = delegatedRfcUri.get("dns");
       assertThat(delegatedRfcUriValue).isNotNull();
-      assertThat(delegatedRfcUriValue.getRawQuery()).isEqualTo("FORCE-XDS");
+      assertThat(delegatedRfcUriValue.getRawQuery()).isNull();
     } else {
       URI delegatedUriValue = delegatedUri.get("dns");
       assertThat(delegatedUriValue).isNotNull();
-      assertThat(delegatedUriValue.getQuery()).isEqualTo("FORCE-XDS");
+      assertThat(delegatedUriValue.getQuery()).isNull();
     }
   }
 
@@ -338,6 +403,7 @@ public class GoogleCloudToProdNameResolverTest {
     public NameResolver newNameResolver(URI targetUri, Args args) {
       if (scheme.equals(targetUri.getScheme())) {
         delegatedUri.put(scheme, targetUri);
+        delegatedArgs.put(scheme, args);
         NameResolver resolver = mock(NameResolver.class);
         delegatedResolver.put(scheme, resolver);
         return resolver;
@@ -349,6 +415,7 @@ public class GoogleCloudToProdNameResolverTest {
     public NameResolver newNameResolver(Uri targetUri, Args args) {
       if (scheme.equals(targetUri.getScheme())) {
         delegatedRfcUri.put(scheme, targetUri);
+        delegatedArgs.put(scheme, args);
         NameResolver resolver = mock(NameResolver.class);
         delegatedResolver.put(scheme, resolver);
         return resolver;

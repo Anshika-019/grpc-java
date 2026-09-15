@@ -29,6 +29,7 @@ import io.grpc.BinaryLog;
 import io.grpc.CallCredentials;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
+import io.grpc.ChannelConfigurator;
 import io.grpc.ChannelCredentials;
 import io.grpc.ClientCall;
 import io.grpc.ClientInterceptor;
@@ -149,12 +150,17 @@ public final class ManagedChannelImplBuilder
   }
 
 
+  ChannelConfigurator channelConfigurator = builder -> { };
+
   ObjectPool<? extends Executor> executorPool = DEFAULT_EXECUTOR_POOL;
 
   ObjectPool<? extends Executor> offloadExecutorPool = DEFAULT_EXECUTOR_POOL;
 
   private final List<ClientInterceptor> interceptors = new ArrayList<>();
   NameResolverRegistry nameResolverRegistry = NameResolverRegistry.getDefaultRegistry();
+
+  @Nullable
+  NameResolverProvider nameResolverProvider;
 
   final List<ClientTransportFilter> transportFilters = new ArrayList<>();
 
@@ -291,6 +297,36 @@ public final class ManagedChannelImplBuilder
       String target, @Nullable ChannelCredentials channelCreds, @Nullable CallCredentials callCreds,
       ClientTransportFactoryBuilder clientTransportFactoryBuilder,
       @Nullable ChannelBuilderDefaultPortProvider channelBuilderDefaultPortProvider) {
+    this(
+        target,
+        channelCreds,
+        callCreds,
+        clientTransportFactoryBuilder,
+        channelBuilderDefaultPortProvider,
+        null,
+        null);
+  }
+
+  /**
+   * Creates a new managed channel builder with a target string, which can be
+   * either a valid {@link io.grpc.NameResolver}-compliant URI, or an authority
+   * string. Transport
+   * implementors must provide client transport factory builder, and may set
+   * custom channel default
+   * port provider.
+   *
+   * @param channelCreds         The ChannelCredentials provided by the user.
+   *                             These may be used when
+   *                             creating derivative channels.
+   * @param nameResolverRegistry the registry used to look up name resolvers.
+   * @param nameResolverProvider the provider used to look up name resolvers.
+   */
+  public ManagedChannelImplBuilder(
+      String target, @Nullable ChannelCredentials channelCreds, @Nullable CallCredentials callCreds,
+      ClientTransportFactoryBuilder clientTransportFactoryBuilder,
+      @Nullable ChannelBuilderDefaultPortProvider channelBuilderDefaultPortProvider,
+      @Nullable NameResolverRegistry nameResolverRegistry,
+      @Nullable NameResolverProvider nameResolverProvider) {
     this.target = checkNotNull(target, "target");
     this.channelCredentials = channelCreds;
     this.callCredentials = callCreds;
@@ -298,11 +334,16 @@ public final class ManagedChannelImplBuilder
         "clientTransportFactoryBuilder");
     this.directServerAddress = null;
 
-    if (channelBuilderDefaultPortProvider != null) {
-      this.channelBuilderDefaultPortProvider = channelBuilderDefaultPortProvider;
-    } else {
-      this.channelBuilderDefaultPortProvider = new ManagedChannelDefaultPortProvider();
-    }
+    this.channelBuilderDefaultPortProvider =
+        channelBuilderDefaultPortProvider != null
+            ? channelBuilderDefaultPortProvider
+            : new ManagedChannelDefaultPortProvider();
+    this.nameResolverRegistry =
+        nameResolverRegistry != null
+            ? nameResolverRegistry
+            : NameResolverRegistry.getDefaultRegistry();
+    this.nameResolverProvider = nameResolverProvider;
+
     // TODO(dnvindhya): Move configurator to all the individual builders
     InternalConfiguratorRegistry.configureChannelBuilder(this);
   }
@@ -422,6 +463,7 @@ public final class ManagedChannelImplBuilder
     Preconditions.checkState(directServerAddress == null,
         "directServerAddress is set (%s), which forbids the use of NameResolverFactory",
         directServerAddress);
+
     if (resolverFactory != null) {
       NameResolverRegistry reg = new NameResolverRegistry();
       if (resolverFactory instanceof NameResolverProvider) {
@@ -582,8 +624,8 @@ public final class ManagedChannelImplBuilder
         parsedMap.put(key, checkListEntryTypes((List<?>) value));
       } else if (value instanceof String) {
         parsedMap.put(key, value);
-      } else if (value instanceof Double) {
-        parsedMap.put(key, value);
+      } else if (value instanceof Number) {
+        parsedMap.put(key, ((Number) value).doubleValue());
       } else if (value instanceof Boolean) {
         parsedMap.put(key, value);
       } else {
@@ -606,8 +648,8 @@ public final class ManagedChannelImplBuilder
         parsedList.add(checkListEntryTypes((List<?>) value));
       } else if (value instanceof String) {
         parsedList.add(value);
-      } else if (value instanceof Double) {
-        parsedList.add(value);
+      } else if (value instanceof Number) {
+        parsedList.add(((Number) value).doubleValue());
       } else if (value instanceof Boolean) {
         parsedList.add(value);
       } else {
@@ -718,13 +760,25 @@ public final class ManagedChannelImplBuilder
   }
 
   @Override
+  public ManagedChannelImplBuilder childChannelConfigurator(
+      ChannelConfigurator channelConfigurator) {
+    checkNotNull(channelConfigurator, "childChannelConfigurator");
+    ChannelConfigurator oldConfigurator = this.channelConfigurator;
+    this.channelConfigurator = builder -> {
+      oldConfigurator.configureChannelBuilder(builder);
+      channelConfigurator.configureChannelBuilder(builder);
+    };
+    return this;
+  }
+
+  @Override
   public ManagedChannel build() {
     ClientTransportFactory clientTransportFactory =
         clientTransportFactoryBuilder.buildClientTransportFactory();
     ResolvedNameResolver resolvedResolver =
         InternalFeatureFlags.getRfc3986UrisEnabled()
-            ? getNameResolverProviderRfc3986(target, nameResolverRegistry)
-            : getNameResolverProvider(target, nameResolverRegistry);
+            ? getNameResolverProviderRfc3986(target, nameResolverRegistry, nameResolverProvider)
+            : getNameResolverProvider(target, nameResolverRegistry, nameResolverProvider);
     resolvedResolver.checkAddressTypes(clientTransportFactory.getSupportedSocketAddressTypes());
     return new ManagedChannelOrphanWrapper(new ManagedChannelImpl(
         this,
@@ -845,7 +899,8 @@ public final class ManagedChannelImplBuilder
 
   @VisibleForTesting
   static ResolvedNameResolver getNameResolverProvider(
-      String target, NameResolverRegistry nameResolverRegistry) {
+      String target, NameResolverRegistry nameResolverRegistry,
+      NameResolverProvider nameResolverProvider) {
     // Finding a NameResolver. Try using the target string as the URI. If that fails, try prepending
     // "dns:///".
     NameResolverProvider provider = null;
@@ -860,19 +915,33 @@ public final class ManagedChannelImplBuilder
     if (targetUri != null) {
       // For "localhost:8080" this would likely cause provider to be null, because "localhost" is
       // parsed as the scheme. Will hit the next case and try "dns:///localhost:8080".
-      provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      // Use the explicit provider if its scheme matches the target URI.
+      if (nameResolverProvider != null
+          && targetUri.getScheme().equals(nameResolverProvider.getScheme())) {
+        provider = nameResolverProvider;
+      } else {
+        provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      }
     }
 
     if (provider == null && !URI_PATTERN.matcher(target).matches()) {
-      // It doesn't look like a URI target. Maybe it's an authority string. Try with the default
-      // scheme from the registry.
+      // It doesn't look like a URI target. Maybe it's an authority string. Try with
+      // the default scheme from the registry (if provider is not specified) or
+      // the provider's default scheme (if provider is specified).
+      String scheme = nameResolverProvider != null
+          ? nameResolverProvider.getScheme()
+          : nameResolverRegistry.getDefaultScheme();
       try {
-        targetUri = new URI(nameResolverRegistry.getDefaultScheme(), "", "/" + target, null);
+        targetUri = new URI(scheme, "", "/" + target, null);
       } catch (URISyntaxException e) {
-        // Should not be possible.
+        // Should not be possible
         throw new IllegalArgumentException(e);
       }
-      provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      if (nameResolverProvider != null) {
+        provider = nameResolverProvider;
+      } else {
+        provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      }
     }
 
     if (provider == null) {
@@ -886,7 +955,8 @@ public final class ManagedChannelImplBuilder
 
   @VisibleForTesting
   static ResolvedNameResolver getNameResolverProviderRfc3986(
-      String target, NameResolverRegistry nameResolverRegistry) {
+      String target, NameResolverRegistry nameResolverRegistry,
+      NameResolverProvider nameResolverProvider) {
     // Finding a NameResolver. Try using the target string as the URI. If that fails, try prepending
     // "dns:///".
     NameResolverProvider provider = null;
@@ -901,15 +971,25 @@ public final class ManagedChannelImplBuilder
     if (targetUri != null) {
       // For "localhost:8080" this would likely cause provider to be null, because "localhost" is
       // parsed as the scheme. Will hit the next case and try "dns:///localhost:8080".
-      provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      // Use the explicit provider if its scheme matches the target URI.
+      if (nameResolverProvider != null
+          && targetUri.getScheme().equals(nameResolverProvider.getScheme())) {
+        provider = nameResolverProvider;
+      } else {
+        provider = nameResolverRegistry.getProviderForScheme(targetUri.getScheme());
+      }
     }
 
     if (provider == null && !URI_PATTERN.matcher(target).matches()) {
-      // It doesn't look like a URI target. Maybe it's an authority string. Try with the default
-      // scheme from the registry.
+      // It doesn't look like a URI target. Maybe it's an authority string. Try with
+      // the default scheme from the registry (if provider is not specified) or
+      // the provider's default scheme (if provider is specified).
+      String scheme = nameResolverProvider != null
+          ? nameResolverProvider.getScheme()
+          : nameResolverRegistry.getDefaultScheme();
       targetUri =
           Uri.newBuilder()
-              .setScheme(nameResolverRegistry.getDefaultScheme())
+              .setScheme(scheme)
               .setHost("")
               .setPath("/" + target)
               .build();
